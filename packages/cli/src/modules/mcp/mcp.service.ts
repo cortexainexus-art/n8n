@@ -3,7 +3,6 @@ import {
 	MCP_APPS_FLAG,
 	MCP_APPS_VARIANT_CONTROL,
 	MCP_APPS_VARIANT_ENABLED,
-	MCP_CANVAS_GROUPS_FLAG,
 	CONTEXT_PREFERENCES_ENABLED_VARIANT,
 	CONTEXT_PREFERENCES_FLAG,
 } from '@n8n/api-types';
@@ -131,8 +130,6 @@ export type McpAppsResolution = {
 /** Per-user resolution of every PostHog-gated MCP feature. */
 export type McpFeatureFlags = {
 	mcpApps: McpAppsResolution;
-	/** Canvas node-group support in the workflow-builder tools. */
-	canvasGroupsEnabled: boolean;
 	/** The `get_user_preferences` tool. */
 	aiPreferencesEnabled: boolean;
 };
@@ -245,7 +242,7 @@ export class McpService {
 	 * PostHog.
 	 */
 	async resolveFeatureFlags(user: User): Promise<McpFeatureFlags> {
-		const { mcpAppsEnabled, mcpCanvasGroupsEnabled } = this.globalConfig.endpoints;
+		const { mcpAppsEnabled } = this.globalConfig.endpoints;
 
 		// `PostHogClient.getFeatureFlags` swallows PostHog errors internally and
 		// returns `{}`, so a transient outage fails closed (feature off, MCP Apps
@@ -254,7 +251,6 @@ export class McpService {
 
 		return {
 			mcpApps: this.resolveMcpApps(mcpAppsEnabled, flags),
-			canvasGroupsEnabled: mcpCanvasGroupsEnabled || flags[MCP_CANVAS_GROUPS_FLAG] === true,
 			// Multivariate flag: only the `variant` arm enables the feature.
 			aiPreferencesEnabled: flags[CONTEXT_PREFERENCES_FLAG] === CONTEXT_PREFERENCES_ENABLED_VARIANT,
 		};
