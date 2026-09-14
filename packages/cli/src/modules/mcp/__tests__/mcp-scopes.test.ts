@@ -53,7 +53,6 @@ const ALL_MAPPED_TOOLS = new Set(Object.values(TOOLS_BY_SCOPE).flat());
 
 const mcpFeatureFlags = (overrides: Partial<McpFeatureFlags> = {}): McpFeatureFlags => ({
 	mcpApps: { enabled: false, variant: 'unassigned' },
-	canvasGroupsEnabled: false,
 	// On by default so the drift guards below cover `get_user_preferences`. Its own
 	// registration tests set it explicitly either way.
 	aiPreferencesEnabled: true,
