@@ -9,6 +9,7 @@ import type { ProtectedResource } from '@/services/protected-resource.registry';
 import { UrlService } from '@/services/url.service';
 
 import {
+	ACTIVITY_LOG_TOOLS,
 	BUILDER_TOOLS,
 	FOLDER_FEATURE_TOOLS,
 	INSTANCE_CONTEXT_TOOLS,
@@ -74,10 +75,13 @@ export class McpProtectedResource implements ProtectedResource {
 		const tagsDisabled = this.globalConfig.tags.disabled;
 		const foldersLicensed = this.licenseState.isFoldersLicensed();
 		const supportedScopes = new Set(this.scopes);
-		// The instance-context tools also need their rollout flag, which resolves per user and so
-		// cannot be read here. This covers the half that is instance-wide: with the module off,
-		// no user can reach them whatever the flag says.
+		// Consent must not advertise a tool `tools/list` will not carry. The instance-context
+		// tools need the `instance-ai` module, and the two that read the log also need something
+		// writing it. The per-user rollout flag cannot be resolved here, so this covers the
+		// instance-wide half.
 		const instanceContextAvailable = this.moduleRegistry.isActive('instance-ai');
+		const activityToolsAvailable =
+			instanceContextAvailable && this.globalConfig.activityLog.enabled;
 
 		return Object.fromEntries(
 			Object.entries(TOOLS_BY_SCOPE)
@@ -89,7 +93,8 @@ export class McpProtectedResource implements ProtectedResource {
 							(builderEnabled || !BUILDER_TOOLS.has(tool)) &&
 							(!tagsDisabled || tool !== 'list_workflow_tags') &&
 							(foldersLicensed || !FOLDER_FEATURE_TOOLS.has(tool)) &&
-							(instanceContextAvailable || !INSTANCE_CONTEXT_TOOLS.has(tool)),
+							(instanceContextAvailable || !INSTANCE_CONTEXT_TOOLS.has(tool)) &&
+							(activityToolsAvailable || !ACTIVITY_LOG_TOOLS.has(tool)),
 					),
 				]),
 		);

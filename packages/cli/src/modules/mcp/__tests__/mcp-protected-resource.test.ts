@@ -9,10 +9,15 @@ import type { UrlService } from '@/services/url.service';
 import { INSTANCE_CONTEXT_TOOLS } from '../mcp-scopes';
 import { McpProtectedResource } from '../mcp-protected-resource';
 
-const makeGlobalConfig = ({ builderEnabled = true, tagsDisabled = false } = {}) =>
+const makeGlobalConfig = ({
+	builderEnabled = true,
+	tagsDisabled = false,
+	activityLogEnabled = true,
+} = {}) =>
 	({
 		endpoints: { mcpBuilderEnabled: builderEnabled },
 		tags: { disabled: tagsDisabled },
+		activityLog: { enabled: activityLogEnabled },
 	}) as unknown as GlobalConfig;
 
 describe('McpProtectedResource', () => {
@@ -49,11 +54,7 @@ describe('McpProtectedResource', () => {
 			expect(scopeTools['tag:read']).toContain('list_workflow_tags');
 		});
 
-		/**
-		 * This decides what the OAuth consent screen advertises. With the `instance-ai` module off
-		 * the tools can never be registered for anyone, so listing them promises a grant the
-		 * server cannot honour.
-		 */
+		/** Consent must not advertise a tool that `tools/list` will not carry. */
 		it('advertises the instance-context tools while the module is active', () => {
 			moduleRegistry.isActive.mockReturnValue(true);
 
@@ -74,6 +75,25 @@ describe('McpProtectedResource', () => {
 			}
 			// Unrelated entries under the same scope are untouched.
 			expect(scopeTools['workflow:read']).toContain('search_workflows');
+		});
+
+		it('withholds the activity tools from consent when nothing writes the log', () => {
+			moduleRegistry.isActive.mockReturnValue(true);
+			const resourceWithoutLog = new McpProtectedResource(
+				urlService,
+				mcpSettingsService,
+				mcpConfig,
+				makeGlobalConfig({ activityLogEnabled: false }),
+				moduleRegistry,
+				licenseState,
+			);
+
+			const scopeTools = resourceWithoutLog.getScopeTools();
+
+			expect(scopeTools['workflow:read']).not.toContain('get_instance_activity');
+			expect(scopeTools['workflow:read']).not.toContain('expand_instance_activity');
+			// Node usage reads its own index, so the log has no bearing on it.
+			expect(scopeTools['workflow:read']).toContain('get_node_usage');
 		});
 
 		it('should drop tools this instance does not expose', () => {
