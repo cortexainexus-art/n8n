@@ -434,25 +434,28 @@ describe('InstanceContextService', () => {
 		});
 
 		/**
-		 * The row outlives the workflow, and with it any proof the workflow was ever exposed.
-		 * `availableInMCP` defaults to withheld, so an unresolvable id must read as withheld or a
-		 * never-exposed workflow's whole history surfaces the moment it is deleted — name included.
+		 * A deleted workflow keeps its deletion and loses the rest: the setting that withheld it
+		 * is gone with the row, so releasing its earlier history would undo that setting after
+		 * the fact.
 		 */
-		it('drops entries naming a workflow that no longer exists', async () => {
-			await record({
-				category: 'workflow',
-				action: 'deleted',
-				projectId: project.id,
-				resourceType: 'workflow',
-				resourceId: 'wf-long-gone',
-				resourceName: 'Nightly sync',
-			});
+		it('keeps only the deletion for a workflow that no longer exists', async () => {
+			for (const action of ['created', 'saved', 'deleted']) {
+				await record({
+					category: 'workflow',
+					action,
+					projectId: project.id,
+					resourceType: 'workflow',
+					resourceId: 'wf-long-gone',
+					resourceName: 'Nightly sync',
+				});
+			}
 
-			expect(await service.list({ user, scope: mcp(), limit: 20 })).toEqual([]);
+			const viaMcp = await service.list({ user, scope: mcp(), limit: 20 });
+			expect(viaMcp.map((entry) => entry.action)).toEqual(['deleted']);
 
-			// The conversation surface has no per-workflow visibility rule, so it still sees it.
+			// The conversation surface has no per-workflow visibility rule, so it sees them all.
 			const viaChat = await service.list({ user, scope: bound(project.id), limit: 20 });
-			expect(viaChat.map((entry) => entry.resourceName)).toEqual(['Nightly sync']);
+			expect(viaChat).toHaveLength(3);
 		});
 
 		it('answers a withheld id exactly as it answers a pruned one', async () => {
