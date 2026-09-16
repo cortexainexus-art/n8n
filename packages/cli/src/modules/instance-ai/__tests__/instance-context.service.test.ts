@@ -677,10 +677,12 @@ describe('InstanceContextService', () => {
 		it('reads the whole instance without enumerating projects for a global reader', async () => {
 			const service = serviceWith();
 
-			await service.list({ user: GLOBAL_READER, scope: unbound(), limit: 5 });
+			await service.list({ user: GLOBAL_READER, scope: unbound(false), limit: 5 });
 
-			expect(projectService.getProjectIdsWithScope).not.toHaveBeenCalled();
-			expect(projectRepository.getPersonalProjectForUser).not.toHaveBeenCalled();
+			// Never enumerated for workflows — that is the branch this exists to avoid.
+			expect(projectService.getProjectIdsWithScope).not.toHaveBeenCalledWith(GLOBAL_READER, [
+				'workflow:read',
+			]);
 			expect(activityEventRepository.findFeed).toHaveBeenLastCalledWith(
 				expect.objectContaining({ projectIds: 'all-projects' }),
 			);
@@ -821,6 +823,69 @@ describe('InstanceContextService', () => {
 			expect(page.hasMore).toBe(true);
 			// The lowest id *read*, not the lowest shown — nothing was shown.
 			expect(page.nextBeforeId).toBe(13);
+		});
+
+		/**
+		 * The over-fetch can hold visible rows below the ones shown, so resuming from the lowest
+		 * row *read* steps over them. Ids 20, 19, 18, 17 with a limit of 2 must resume at 19.
+		 */
+		it('resumes at the last row shown, not the lowest row read', async () => {
+			const service = serviceWith();
+			activityEventRepository.findFeed.mockResolvedValue(
+				[20, 19, 18, 17].map((id) => entry({ id, resourceId: 'wf-1' })),
+			);
+			workflowRepository.findMcpAvailabilityByIds.mockResolvedValue(new Map([['wf-1', true]]));
+
+			const page = await service.listPage({ user: USER, scope: MCP_BOUND, limit: 2 });
+
+			expect(page.entries.map((e) => e.id)).toEqual([20, 19]);
+			expect(page.hasMore).toBe(true);
+			// 17 would lose 18.
+			expect(page.nextBeforeId).toBe(19);
+		});
+
+		/** A resource narrowed to a withheld workflow must answer as a pruned one does. */
+		it('answers a withheld resource filter exactly as it answers an unknown one', async () => {
+			const service = serviceWith();
+			activityEventRepository.findFeed.mockResolvedValue(
+				Array.from({ length: 8 }, (_, i) => entry({ id: 40 - i, resourceId: 'wf-hidden' })),
+			);
+			workflowRepository.findMcpAvailabilityByIds.mockResolvedValue(
+				new Map([['wf-hidden', false]]),
+			);
+
+			const withheld = await service.listPage({
+				user: USER,
+				scope: MCP_BOUND,
+				limit: 1,
+				resourceId: 'wf-hidden',
+			});
+
+			activityEventRepository.findFeed.mockResolvedValue([]);
+			const unknown = await service.listPage({
+				user: USER,
+				scope: MCP_BOUND,
+				limit: 1,
+				resourceId: 'wf-never-existed',
+			});
+
+			expect(withheld).toEqual(unknown);
+		});
+
+		/** Reading every workflow does not imply reading every credential, nor none of them. */
+		it('keeps project-level credential access for a global workflow reader', async () => {
+			const service = serviceWith();
+			projectService.getProjectIdsWithScope.mockImplementation(async (_user, scopes) =>
+				scopes.includes('credential:read') ? ['team-a'] : [],
+			);
+			activityEventRepository.findFeed.mockResolvedValue([
+				entry({ id: 2, category: 'credential', resourceType: 'credential', projectId: 'team-a' }),
+				entry({ id: 1, category: 'credential', resourceType: 'credential', projectId: 'team-b' }),
+			]);
+
+			const entries = await service.list({ user: GLOBAL_READER, scope: unbound(true), limit: 5 });
+
+			expect(entries.map((e) => e.id)).toEqual([2]);
 		});
 
 		it('reports no more below when the read did not fill', async () => {

@@ -397,19 +397,34 @@ export class InstanceContextService {
 
 		const visible = filtersWithheld ? await this.withoutWithheldWorkflows(rows, resolved) : rows;
 
+		// A read narrowed to one resource answers about that resource, so a withheld one has to
+		// answer exactly as a pruned one does. Reporting `hasMore` off rows that were then
+		// withheld would say "this resource has history you cannot see", which is the probe the
+		// `notFound` contract exists to prevent.
+		if (input.resourceId !== undefined && rows.length > 0 && visible.length === 0) {
+			return empty;
+		}
+
 		// More is below either because the filter cut this page short of a full read, or because a
 		// full page came back and the read itself was capped. Both mean "page again".
 		const hasMore = visible.length > input.limit || rows.length === fetchLimit;
 
-		// The cursor is the lowest id *read*, not the lowest shown. A page where everything was
-		// withheld shows nothing and still has to be pageable — that is the whole case `hasMore`
-		// exists for, and a cursor drawn from the visible rows would be absent exactly there.
-		const lowestRead = rows.at(-1)?.id;
+		const shown = visible.slice(0, input.limit);
+
+		// Where the next page resumes, and the two cases are not the same.
+		//
+		// When rows were shown, it has to be the last one shown: the over-fetch may hold further
+		// visible rows below it, and resuming from the lowest row *read* would step over them.
+		// With visible ids 20, 19, 18, 17 and a limit of 2 that silently loses 18.
+		//
+		// When nothing was shown, there is no such row, and the lowest id read is the only way
+		// past a window that was entirely withheld — which is the case `hasMore` exists for.
+		const resumeFrom = shown.at(-1)?.id ?? rows.at(-1)?.id;
 
 		return {
-			entries: visible.slice(0, input.limit).map((row) => toActivityEntry(row, input.user.id)),
+			entries: shown.map((row) => toActivityEntry(row, input.user.id)),
 			hasMore,
-			...(hasMore && lowestRead !== undefined ? { nextBeforeId: lowestRead } : {}),
+			...(hasMore && resumeFrom !== undefined ? { nextBeforeId: resumeFrom } : {}),
 		};
 	}
 
@@ -635,10 +650,14 @@ export class InstanceContextService {
 		// A global reader needs no project predicate at all, which is both correct and the only
 		// bounded option: `getProjectIdsWithScope` would hand back every project on the instance.
 		if (hasGlobalScope(user, ['workflow:read'], { mode: 'allOf' })) {
-			const credentialProjectIds: ActivityProjectScope =
-				scope.credentialGranted && hasGlobalScope(user, ['credential:read'], { mode: 'allOf' })
+			// Reading every workflow does not imply reading every credential, and the two are
+			// resolved apart: global `credential:read` opens all of them, otherwise the caller may
+			// still hold it on individual projects and should see those.
+			const credentialProjectIds: ActivityProjectScope = !scope.credentialGranted
+				? []
+				: hasGlobalScope(user, ['credential:read'], { mode: 'allOf' })
 					? 'all-projects'
-					: [];
+					: await this.credentialReadableProjectIds(user, null);
 			return {
 				surface: 'mcp',
 				projectIds: 'all-projects',
@@ -678,13 +697,18 @@ export class InstanceContextService {
 	 * would otherwise read credential names and types for a project whose credentials they cannot
 	 * list.
 	 */
-	private async credentialReadableProjectIds(user: User, projectIds: string[]): Promise<string[]> {
+	private async credentialReadableProjectIds(
+		user: User,
+		/** Narrow to these, or `null` to take every project the caller may read credentials in. */
+		projectIds: string[] | null,
+	): Promise<string[]> {
 		const readable = await this.projectService.getProjectIdsWithScope(user, ['credential:read']);
 		const readableSet = new Set(readable);
 
 		const personalProject = await this.projectRepository.getPersonalProjectForUser(user.id);
 		if (personalProject) readableSet.add(personalProject.id);
 
+		if (projectIds === null) return [...readableSet];
 		return projectIds.filter((projectId) => readableSet.has(projectId));
 	}
 
