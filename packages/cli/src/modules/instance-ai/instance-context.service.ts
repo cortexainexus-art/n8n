@@ -829,8 +829,20 @@ const updatePreamble = (tools: SurfaceToolNames) => [
 ];
 
 /** Named so the agent can act on one without a lookup: the id is what every tool takes. */
-function renderInventory(inventory: Inventory, tools: SurfaceToolNames): string[] {
-	if (inventory.total === 0) return ['Nothing has been built here yet.', ''];
+function renderInventory(
+	inventory: Inventory,
+	tools: SurfaceToolNames,
+	surface: ResolvedScope['surface'],
+): string[] {
+	// An empty inventory means two different things. On MCP the count is filtered, so zero
+	// usually means "all withheld" on an instance that predates `availableInMCP` — and a block
+	// can still render off the other legs, putting this line in front of activity that proves
+	// the estate exists. Saying "nothing has been built" there is simply false.
+	if (inventory.total === 0) {
+		return surface === 'mcp'
+			? ['No workflows here are exposed to MCP, so none can be named.', '']
+			: ['Nothing has been built here yet.', ''];
+	}
 
 	const named = inventory.workflows.map(
 		(workflow) =>
@@ -893,7 +905,7 @@ function renderBlock(input: {
 	const prose = [
 		...(input.isUpdate ? updatePreamble(tools) : initialPreamble(tools)),
 		'',
-		...(input.inventory ? renderInventory(input.inventory, tools) : []),
+		...(input.inventory ? renderInventory(input.inventory, tools, input.surface) : []),
 		...renderRuns(input.runs, input.isUpdate, input.now),
 		...(input.entries.length > 0
 			? [
