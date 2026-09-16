@@ -142,6 +142,7 @@ export class LogStreamingEventRelay extends EventRelay {
 			'execution-throttled': (event) => this.executionThrottled(event),
 			'execution-started-during-bootup': (event) => this.executionStartedDuringBootup(event),
 			'execution-cancelled': (event) => this.executionCancelled(event),
+			'execution-crashed': (event) => this.executionCrashed(event),
 			'execution-deleted': (event) => this.executionDeleted(event),
 			'execution-waiting': (event) => this.executionWaiting(event),
 			'execution-resumed': (event) => this.executionResumed(event),
@@ -382,6 +383,8 @@ export class LogStreamingEventRelay extends EventRelay {
 	}
 
 	private workflowPostExecute(event: RelayEventMap['workflow-post-execute']) {
+		if (event.runData?.status === 'crashed') return;
+
 		const { runData, workflow, executionId, projectId, projectName, ...rest } =
 			withoutExecutionMetadata(event);
 
@@ -1039,6 +1042,20 @@ export class LogStreamingEventRelay extends EventRelay {
 				workflowName,
 				reason,
 			},
+		});
+	}
+
+	private executionCrashed({
+		executionId,
+		workflowId,
+		workflowName,
+		mode,
+		detector,
+		hostId,
+	}: RelayEventMap['execution-crashed']) {
+		void this.eventBus.sendWorkflowEvent({
+			eventName: 'n8n.workflow.crashed',
+			payload: { executionId, workflowId, workflowName, mode, detector, hostId },
 		});
 	}
 

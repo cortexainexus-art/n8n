@@ -258,6 +258,7 @@ export class TelemetryEventRelay extends EventRelay {
 				this.instanceFirstProductionWorkflowFailed(event),
 			'first-workflow-data-loaded': (event) => this.firstWorkflowDataLoaded(event),
 			'workflow-post-execute': async (event) => await this.workflowPostExecute(event),
+			'execution-crashed': (event) => this.executionCrashed(event),
 			'user-changed-role': (event) => this.userChangedRole(event),
 			'user-retrieved-user': (event) => this.userRetrievedUser(event),
 			'user-retrieved-all-users': (event) => this.userRetrievedAllUsers(event),
@@ -1659,7 +1660,18 @@ export class TelemetryEventRelay extends EventRelay {
 			}
 		}
 
-		this.telemetry.trackWorkflowExecution(telemetryProperties);
+		if (executionStatus !== 'crashed') this.telemetry.trackWorkflowExecution(telemetryProperties);
+	}
+
+	private executionCrashed({ workflowId, mode }: RelayEventMap['execution-crashed']) {
+		this.telemetry.trackWorkflowExecution({
+			workflow_id: workflowId,
+			success: false,
+			crashed: true,
+			is_manual: mode === 'manual',
+			execution_mode: mode,
+			version_cli: N8N_VERSION,
+		});
 	}
 
 	// #endregion

@@ -2010,6 +2010,52 @@ describe('LogStreamingEventRelay', () => {
 			},
 		);
 
+		it('should log on `execution-crashed` event', () => {
+			const event: RelayEventMap['execution-crashed'] = {
+				executionId: 'exec-crashed-123',
+				workflowId: 'wf-456',
+				workflowName: 'Crashed Workflow',
+				mode: 'trigger',
+				startedAt: new Date('2025-01-01T00:00:00.000Z'),
+				detector: 'queue-recovery',
+				hostId: 'main-1',
+			};
+
+			eventService.emit('execution-crashed', event);
+
+			expect(eventBus.sendWorkflowEvent).toHaveBeenCalledWith({
+				eventName: 'n8n.workflow.crashed',
+				payload: {
+					executionId: 'exec-crashed-123',
+					workflowId: 'wf-456',
+					workflowName: 'Crashed Workflow',
+					mode: 'trigger',
+					detector: 'queue-recovery',
+					hostId: 'main-1',
+				},
+			});
+		});
+
+		it('should not log on `workflow-post-execute` for a crashed execution', () => {
+			const runData = mock<IRun>({
+				finished: false,
+				status: 'crashed',
+				mode: 'trigger',
+				jobId: '67890',
+				data: { resultData: {} },
+			} as never);
+
+			eventService.emit('workflow-post-execute', {
+				executionId: 'exec-123',
+				userId: 'user-456',
+				workflow: mock<IWorkflowBase>({ id: 'wf-789', name: 'Test Workflow' }),
+				runData,
+			});
+
+			expect(eventBus.sendWorkflowEvent).not.toHaveBeenCalled();
+			expect(eventBus.sendQueueEvent).not.toHaveBeenCalled();
+		});
+
 		it('should log on `execution-deleted` event with multiple execution ids', () => {
 			const event: RelayEventMap['execution-deleted'] = {
 				user: {

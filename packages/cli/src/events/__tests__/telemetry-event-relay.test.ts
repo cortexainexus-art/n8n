@@ -3585,6 +3585,50 @@ describe('TelemetryEventRelay', () => {
 			expect(telemetry.trackWorkflowExecution).not.toHaveBeenCalled();
 		});
 
+		it('should track a crashed execution on `execution-crashed`', () => {
+			const event: RelayEventMap['execution-crashed'] = {
+				executionId: 'execution123',
+				workflowId: 'workflow123',
+				workflowName: 'Test Workflow',
+				mode: 'trigger',
+				detector: 'queue-recovery',
+				hostId: 'main-1',
+			};
+
+			eventService.emit('execution-crashed', event);
+
+			expect(telemetry.trackWorkflowExecution).toHaveBeenCalledWith({
+				workflow_id: 'workflow123',
+				success: false,
+				crashed: true,
+				is_manual: false,
+				execution_mode: 'trigger',
+				version_cli: N8N_VERSION,
+			});
+		});
+
+		it('should not track a crashed execution on `workflow-post-execute`', async () => {
+			const runData = {
+				finished: false,
+				status: 'crashed',
+				mode: 'trigger',
+				data: { resultData: { runData: {} } },
+			} as unknown as IRun;
+
+			const event: RelayEventMap['workflow-post-execute'] = {
+				workflow: mockWorkflowBase,
+				executionId: 'execution123',
+				userId: 'user123',
+				runData,
+			};
+
+			eventService.emit('workflow-post-execute', event);
+
+			await flushPromises();
+
+			expect(telemetry.trackWorkflowExecution).not.toHaveBeenCalled();
+		});
+
 		it('should track successful workflow execution', async () => {
 			const runData = {
 				finished: true,
