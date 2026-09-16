@@ -18,7 +18,6 @@ import { Container } from '@n8n/di';
 import { stringify } from 'flatted';
 import { InstanceSettings } from 'n8n-core';
 import { randomInt } from 'n8n-workflow';
-import assert from 'node:assert';
 import { v4 as uuid } from 'uuid';
 import { mock } from 'vitest-mock-extended';
 
@@ -58,6 +57,7 @@ describe('ExecutionRecoveryService', () => {
 	let executionPersistence: ExecutionPersistence;
 	let workflowRepository: WorkflowRepository;
 	let globalConfig: GlobalConfig;
+	let executionCrashService: ExecutionCrashService;
 
 	beforeAll(async () => {
 		await testDb.init();
@@ -65,6 +65,12 @@ describe('ExecutionRecoveryService', () => {
 		executionPersistence = Container.get(ExecutionPersistence);
 		workflowRepository = Container.get(WorkflowRepository);
 		globalConfig = Container.get(GlobalConfig);
+		executionCrashService = new ExecutionCrashService(
+			executionRepository,
+			mock(),
+			mock(),
+			instanceSettings,
+		);
 
 		executionRecoveryService = new ExecutionRecoveryService(
 			mock(),
@@ -78,7 +84,7 @@ describe('ExecutionRecoveryService', () => {
 			ownershipService,
 			projectRelationRepository,
 			workflowPushNotifier,
-			new ExecutionCrashService(executionRepository, mock()),
+			executionCrashService,
 		);
 	});
 
@@ -192,6 +198,60 @@ describe('ExecutionRecoveryService', () => {
 
 				expect(amendedExecution.status).toBe('crashed');
 				expect(amendedExecution.stoppedAt).not.toBe(execution.stoppedAt);
+			});
+
+			test('should claim the execution exactly once', async () => {
+				/**
+				 * Arrange
+				 */
+				const workflow = await createWorkflow(OOM_WORKFLOW);
+				const execution = await createExecution(
+					{
+						status: 'running',
+						data: stringify(IN_PROGRESS_EXECUTION_DATA),
+					},
+					workflow,
+				);
+				const claimSpy = vi.spyOn(executionCrashService, 'markAsCrashedWithoutCounting');
+
+				/**
+				 * Act
+				 */
+				await executionRecoveryService.recoverFromLogs(execution.id, []);
+
+				/**
+				 * Assert
+				 */
+				expect(claimSpy).toHaveBeenCalledExactlyOnceWith(execution.id, 'startup-recovery');
+			});
+
+			test('should neither run hooks nor update an execution that is already `crashed`', async () => {
+				/**
+				 * Arrange
+				 */
+				const workflow = await createWorkflow(OOM_WORKFLOW);
+				const execution = await createExecution(
+					{
+						status: 'crashed',
+						data: stringify(IN_PROGRESS_EXECUTION_DATA),
+					},
+					workflow,
+				);
+				// @ts-expect-error Private method
+				const runHooksSpy = vi.spyOn(executionRecoveryService, 'runHooks');
+				const updateSpy = vi.spyOn(executionPersistence, 'updateExistingExecution');
+
+				/**
+				 * Act
+				 */
+				const amendedExecution = await executionRecoveryService.recoverFromLogs(execution.id, []);
+
+				/**
+				 * Assert
+				 */
+				expect(amendedExecution).toBeNull();
+				expect(runHooksSpy).not.toHaveBeenCalled();
+				expect(updateSpy).not.toHaveBeenCalled();
 			});
 
 			test('pushes `executionRecovered` only to users with workflow access, once a client connects', async () => {
@@ -330,7 +390,7 @@ describe('ExecutionRecoveryService', () => {
 				expect(amendedExecution).toBeNull();
 			});
 
-			test('for successful dataless execution, should update `status`, `stoppedAt` and `data`', async () => {
+			test('for successful dataless execution, should return `null` and leave the row unchanged', async () => {
 				/**
 				 * Arrange
 				 */
@@ -343,6 +403,7 @@ describe('ExecutionRecoveryService', () => {
 					workflow,
 				);
 				const messages = setupMessages(execution.id, 'Some workflow');
+				const updateSpy = vi.spyOn(executionPersistence, 'updateExistingExecution');
 
 				/**
 				 * Act
@@ -355,10 +416,10 @@ describe('ExecutionRecoveryService', () => {
 				/**
 				 * Assert
 				 */
-				assert(amendedExecution);
-				expect(amendedExecution.stoppedAt).not.toBe(execution.stoppedAt);
-				expect(amendedExecution.data).toEqual({ version: 1, resultData: { runData: {} } });
-				expect(amendedExecution.status).toBe('crashed');
+				expect(amendedExecution).toBeNull();
+				expect(updateSpy).not.toHaveBeenCalled();
+				const stored = await executionRepository.findOneBy({ id: execution.id });
+				expect(stored?.status).toBe('success');
 			});
 
 			test('for running execution without `runData`, should reconstruct missing node data', async () => {

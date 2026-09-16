@@ -299,6 +299,7 @@ describe('ExecutionRepository', () => {
 					workflowId: workflow.id,
 					workflowName: workflow.name,
 					mode: 'manual',
+					startedAt: expect.any(Date),
 				},
 			]);
 		});

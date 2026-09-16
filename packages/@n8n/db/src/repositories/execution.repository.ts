@@ -77,6 +77,7 @@ export type CrashedExecution = {
 	workflowId: string;
 	workflowName?: string;
 	mode: WorkflowExecuteMode;
+	startedAt: Date | null;
 };
 
 export interface UpdateExecutionConditions {
@@ -449,18 +450,25 @@ export class ExecutionRepository extends BaseRepository<ExecutionEntity> {
 			if (updateResult?.affected === 0) return [];
 
 			const rows = await tx.find(ExecutionEntity, {
-				select: { id: true, workflowId: true, mode: true, workflow: { id: true, name: true } },
+				select: {
+					id: true,
+					workflowId: true,
+					mode: true,
+					startedAt: true,
+					workflow: { id: true, name: true },
+				},
 				relations: { workflow: true },
 				where: { ...where, status: 'crashed', stoppedAt },
 				// The UPDATE above also crashes soft-deleted rows, so keep them in the read.
 				withDeleted: true,
 			});
 
-			return rows.map(({ id, workflowId, mode, workflow }) => ({
+			return rows.map(({ id, workflowId, mode, startedAt, workflow }) => ({
 				id,
 				workflowId,
 				workflowName: workflow?.name,
 				mode,
+				startedAt,
 			}));
 		});
 	}

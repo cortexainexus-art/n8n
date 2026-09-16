@@ -58,6 +58,13 @@ export type UserLike = {
  */
 export type PolicyWriteOrigin = 'composed-save' | 'document-api';
 
+export type CrashDetector =
+	| 'stall'
+	| 'queue-recovery'
+	| 'startup-recovery'
+	| 'start-failure'
+	| 'workflow-deactivation';
+
 export type ProjectSummary = {
 	id: string;
 	name: string;
@@ -637,6 +644,16 @@ export type RelayEventMap = {
 		workflowId?: string;
 		workflowName?: string;
 		reason: CancellationReason;
+	};
+
+	'execution-crashed': {
+		executionId: string;
+		workflowId: string;
+		workflowName?: string;
+		mode: WorkflowExecuteMode;
+		startedAt?: Date;
+		detector: CrashDetector;
+		hostId: string;
 	};
 
 	'execution-deleted': {

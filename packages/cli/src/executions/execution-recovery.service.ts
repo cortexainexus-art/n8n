@@ -123,6 +123,14 @@ export class ExecutionRecoveryService {
 
 		if (!amendedExecution) return null;
 
+		if (amendedExecution.status === 'crashed') {
+			const claimed = await this.executionCrashService.markAsCrashedWithoutCounting(
+				executionId,
+				'startup-recovery',
+			);
+			if (claimed.length === 0) return null;
+		}
+
 		this.logger.info('[Recovery] Logs available, amended execution', {
 			executionId: amendedExecution.id,
 		});
@@ -232,18 +240,12 @@ export class ExecutionRecoveryService {
 	}
 
 	private async amendWithoutLogs(executionId: string) {
-		const exists = await this.executionRepository.exists({ where: { id: executionId } });
-
-		if (!exists) return null;
-
-		await this.executionCrashService.markAsCrashedWithoutCounting(executionId);
-
 		const execution = await this.executionPersistence.findSingleExecution(executionId, {
 			includeData: true,
 			unflattenData: true,
 		});
-
-		return execution ?? null;
+		if (!execution) return null;
+		return { ...execution, status: 'crashed', stoppedAt: new Date() } as IExecutionResponse;
 	}
 
 	private toRelevantMessages(messages: EventMessageTypes[]) {
