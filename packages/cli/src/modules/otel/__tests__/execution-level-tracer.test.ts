@@ -326,6 +326,12 @@ describe('ExecutionLevelTracer', () => {
 				tracingContext: inboundTracingContext,
 				workflow: defaultWorkflow,
 			});
+			tracer.startNode({
+				executionId: 'exec-crashed',
+				node: { id: 'n1', name: 'Node1', type: 'n8n-nodes-base.set', typeVersion: 1 },
+			});
+
+			expect(tracer.hasWorkflowSpan('exec-crashed')).toBe(true);
 
 			tracer.endCrashedWorkflow({
 				executionId: 'exec-crashed',
@@ -335,10 +341,15 @@ describe('ExecutionLevelTracer', () => {
 				detector: 'stall',
 			});
 
-			const spans = otel.getFinishedSpans();
-			expect(spans).toHaveLength(1);
+			expect(tracer.hasWorkflowSpan('exec-crashed')).toBe(false);
 
-			const span = spans[0];
+			const spans = otel.getFinishedSpans();
+			expect(spans).toHaveLength(2);
+
+			const nodeSpan = spans.find((s) => s.name === 'node.execute')!;
+			expect(nodeSpan.attributes['n8n.node.termination_reason']).toBe('workflow_crashed');
+
+			const span = spans.find((s) => s.name === 'workflow.execute')!;
 			expect(span.name).toBe('workflow.execute');
 			expect(span.attributes['n8n.execution.status']).toBe('crashed');
 			expect(span.attributes['n8n.execution.error_type']).toBe('WorkflowCrashedError');

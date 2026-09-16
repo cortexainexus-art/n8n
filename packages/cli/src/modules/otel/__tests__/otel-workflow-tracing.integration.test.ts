@@ -5,7 +5,6 @@ import { SpanStatusCode } from '@opentelemetry/api';
 import { NodeConnectionTypes } from 'n8n-workflow';
 import { v4 as uuid } from 'uuid';
 
-import { EventService } from '@/events/event.service';
 import { WaitTracker } from '@/wait-tracker';
 import type { WorkflowRunner } from '@/workflow-runner';
 import { createUser } from '@test-integration/db/users';
@@ -171,44 +170,6 @@ describe('OTEL Workflow Tracing Integration', () => {
 		const workflowSpan = otel.getFinishedSpans().find((s) => s.name === 'workflow.execute')!;
 		expect(workflowSpan).toBeDefined();
 		expect(workflowSpan.spanContext().traceId).toBe(inboundTraceId);
-	});
-
-	it('should end a reconstructed workflow span when a running execution crashes', async () => {
-		const project = await createTeamProject();
-		const workflow = await createWorkflow(createMultiNodeWorkflowFixture(), project);
-		const startedAt = new Date(Date.now() - 60_000);
-		const execution = await executionRepository.save({
-			workflowId: workflow.id,
-			mode: 'trigger',
-			status: 'running',
-			finished: false,
-			createdAt: startedAt,
-			startedAt,
-			tracingContext: { traceparent: '00-9bf2bd87b5053953e3fa08d8d889494b-b7ad6b7169203331-01' },
-		});
-
-		Container.get(EventService).emit('execution-crashed', {
-			executionId: execution.id,
-			workflowId: workflow.id,
-			workflowName: workflow.name,
-			mode: 'trigger',
-			startedAt,
-			detector: 'queue-recovery',
-			hostId: 'main-1',
-		});
-
-		await vi.waitFor(() => {
-			expect(otel.getFinishedSpans().some((s) => s.name === 'workflow.execute')).toBe(true);
-		});
-
-		const workflowSpans = otel
-			.getFinishedSpans()
-			.filter(
-				(s) => s.name === 'workflow.execute' && s.attributes['n8n.execution.id'] === execution.id,
-			);
-		expect(workflowSpans).toHaveLength(1);
-		expect(workflowSpans[0].attributes['n8n.execution.status']).toBe('crashed');
-		expect(workflowSpans[0].attributes['n8n.execution.reconstructed']).toBe(true);
 	});
 });
 

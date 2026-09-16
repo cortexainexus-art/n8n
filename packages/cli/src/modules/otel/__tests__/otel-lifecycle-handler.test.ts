@@ -9,7 +9,7 @@ import { mock } from 'vitest-mock-extended';
 import { Workflow } from 'n8n-workflow';
 import type { INodeTypes, IRun, IRunExecutionData, WorkflowExecuteMode } from 'n8n-workflow';
 
-import type { EventService } from '@/events/event.service';
+import { EventService } from '@/events/event.service';
 import type { RelayEventMap } from '@/events/maps/relay.event-map';
 import type { OwnershipService } from '@/services/ownership.service';
 
@@ -681,7 +681,7 @@ describe('OtelLifecycleHandler', () => {
 			...overrides,
 		});
 
-		const makeHandler = (overrides: Partial<OtelConfig> = {}) =>
+		const makeHandler = (overrides: Partial<OtelConfig> = {}, eventService?: EventService) =>
 			new OtelLifecycleHandler(
 				tracer,
 				traceContextService,
@@ -690,12 +690,36 @@ describe('OtelLifecycleHandler', () => {
 				ownershipService,
 				logger,
 				licenseState,
-				mock<EventService>(),
+				eventService ?? mock<EventService>(),
 			);
 
 		beforeEach(() => {
 			vi.clearAllMocks();
+			tracer.hasWorkflowSpan.mockReturnValue(false);
 			traceContextService.get.mockResolvedValue(storedTracingContext);
+		});
+
+		it('should handle the `execution-crashed` event once initialised', async () => {
+			const eventService = new EventService();
+			makeHandler({}, eventService).init();
+
+			eventService.emit('execution-crashed', makeEvent());
+			await new Promise(setImmediate);
+
+			expect(tracer.endCrashedWorkflow).toHaveBeenCalledWith(
+				expect.objectContaining({ executionId: 'exec-1', detector: 'queue-recovery' }),
+			);
+		});
+
+		it('should end a tracked span before any lookup, so the after hook cannot close it first', async () => {
+			tracer.hasWorkflowSpan.mockReturnValue(true);
+
+			await makeHandler().onExecutionCrashed(makeEvent());
+
+			expect(traceContextService.get).not.toHaveBeenCalled();
+			expect(tracer.endCrashedWorkflow).toHaveBeenCalledWith(
+				expect.objectContaining({ executionId: 'exec-1', tracingContext: undefined }),
+			);
 		});
 
 		it('should do nothing when tracing is disabled', async () => {

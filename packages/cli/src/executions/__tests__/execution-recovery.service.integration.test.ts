@@ -225,6 +225,33 @@ describe('ExecutionRecoveryService', () => {
 				expect(claimSpy).toHaveBeenCalledExactlyOnceWith(execution.id, 'startup-recovery');
 			});
 
+			test('should claim the execution and return `null` when its data is missing', async () => {
+				/**
+				 * Arrange
+				 */
+				const workflow = await createWorkflow(OOM_WORKFLOW);
+				const execution = await executionRepository.save({
+					workflowId: workflow.id,
+					mode: 'trigger',
+					status: 'running',
+					finished: false,
+					createdAt: new Date(),
+					startedAt: new Date(),
+				});
+
+				/**
+				 * Act
+				 */
+				const amendedExecution = await executionRecoveryService.recoverFromLogs(execution.id, []);
+
+				/**
+				 * Assert
+				 */
+				expect(amendedExecution).toBeNull();
+				const stored = await executionRepository.findOneBy({ id: execution.id });
+				expect(stored?.status).toBe('crashed');
+			});
+
 			test('should neither run hooks nor update an execution that is already `crashed`', async () => {
 				/**
 				 * Arrange

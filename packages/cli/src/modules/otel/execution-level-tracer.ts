@@ -136,7 +136,7 @@ export class ExecutionLevelTracer {
 			});
 			span.setStatus({ code: SpanStatusCode.ERROR });
 			span.recordException(new WorkflowCrashedError());
-			this.endDanglingNodeSpans(params.executionId);
+			this.endDanglingNodeSpans(params.executionId, 'workflow_crashed');
 			span.end();
 		} catch (error) {
 			this.logger.warn('Failed to end crashed workflow span', {
@@ -247,6 +247,10 @@ export class ExecutionLevelTracer {
 	 * disconnected trace. Undefined when neither span is active (e.g. otel
 	 * disabled, or the execution/node isn't tracked here).
 	 */
+	hasWorkflowSpan(executionId: string): boolean {
+		return this.activeWorkflowSpans.has(executionId);
+	}
+
 	getActiveContext(executionId: string, nodeName?: string): Context | undefined {
 		const span = this.findMostSpecificSpan(executionId, nodeName);
 		return span ? trace.setSpan(context.active(), span) : undefined;
@@ -305,12 +309,12 @@ export class ExecutionLevelTracer {
 		);
 	}
 
-	private endDanglingNodeSpans(executionId: string): void {
+	private endDanglingNodeSpans(executionId: string, reason = 'workflow_cancelled'): void {
 		const executionNodes = this.activeNodeSpansByExecutionId.get(executionId);
 		if (!executionNodes) return;
 
 		for (const tracked of executionNodes.values()) {
-			terminateSpan(tracked.span, 'workflow_cancelled');
+			terminateSpan(tracked.span, reason);
 		}
 
 		this.activeNodeSpansByExecutionId.delete(executionId);

@@ -244,8 +244,13 @@ export class ExecutionRecoveryService {
 			includeData: true,
 			unflattenData: true,
 		});
-		if (!execution) return null;
-		return { ...execution, status: 'crashed', stoppedAt: new Date() } as IExecutionResponse;
+		if (execution) {
+			return { ...execution, status: 'crashed', stoppedAt: new Date() } as IExecutionResponse;
+		}
+
+		// No hook can run without the data, so the row is claimed and counted from here.
+		await this.executionCrashService.markAsCrashed(executionId, 'startup-recovery');
+		return null;
 	}
 
 	private toRelevantMessages(messages: EventMessageTypes[]) {
