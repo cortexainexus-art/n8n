@@ -43,6 +43,7 @@ const MCP_BOUND: InstanceContextScope = {
 	surface: 'mcp',
 	projectId: PROJECT_ID,
 	credentialGranted: true,
+	executionGranted: true,
 };
 
 function entry(overrides: Partial<ActivityEvent> = {}): ActivityEvent {
@@ -636,6 +637,7 @@ describe('InstanceContextService', () => {
 		const unbound = (credentialGranted = true): InstanceContextScope => ({
 			surface: 'mcp',
 			credentialGranted,
+			executionGranted: true,
 		});
 
 		it('reads every project the caller can see, plus their personal one', async () => {
@@ -863,7 +865,15 @@ describe('InstanceContextService', () => {
 		 * A deleted workflow cannot be withheld from anything, and its deletion is the entry most
 		 * worth carrying — so an unresolvable id is kept rather than dropped to be safe.
 		 */
-		it('keeps the deletion of a workflow that no longer exists', async () => {
+		/**
+		 * The row outlives the workflow, and with it any proof the workflow was ever exposed.
+		 * `availableInMCP` defaults to withheld, so showing an unresolvable id would publish the
+		 * whole history of a workflow that was never visible the moment it was deleted.
+		 *
+		 * The cost is that deletions of workflows that *were* exposed go too. Recording visibility
+		 * on the row at write time is what would let both hold.
+		 */
+		it('drops entries for a workflow that no longer exists, deletions included', async () => {
 			const service = serviceWith();
 			activityEventRepository.findFeed.mockResolvedValue([
 				entry({ id: 3, action: 'deleted', resourceId: 'wf-gone' }),
@@ -871,6 +881,17 @@ describe('InstanceContextService', () => {
 			workflowRepository.findMcpAvailabilityByIds.mockResolvedValue(new Map());
 
 			const entries = await service.list({ user: USER, scope: MCP_BOUND, limit: 5 });
+
+			expect(entries).toEqual([]);
+		});
+
+		it('still shows them on the conversation surface, which has no MCP visibility rule', async () => {
+			const service = serviceWith();
+			activityEventRepository.findFeed.mockResolvedValue([
+				entry({ id: 3, action: 'deleted', resourceId: 'wf-gone' }),
+			]);
+
+			const entries = await service.list({ user: USER, scope: BOUND, limit: 5 });
 
 			expect(entries.map((e) => e.id)).toEqual([3]);
 		});
@@ -898,6 +919,7 @@ describe('InstanceContextService', () => {
 			activityEventRepository.findFeed.mockResolvedValue(
 				Array.from({ length: 12 }, (_, index) => entry({ id: index + 1 })),
 			);
+			workflowRepository.findMcpAvailabilityByIds.mockResolvedValue(new Map([['wf-1', true]]));
 
 			const entries = await service.list({ user: USER, scope: MCP_BOUND, limit: 5 });
 

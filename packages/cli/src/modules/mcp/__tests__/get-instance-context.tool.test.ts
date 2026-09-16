@@ -8,6 +8,7 @@ import { USER_CALLED_MCP_TOOL_EVENT } from '../mcp.constants';
 import {
 	createGetInstanceContextTool,
 	EMPTY_INSTANCE_CONTEXT_TEXT,
+	NOTHING_EXPOSED_TEXT,
 } from '../tools/get-instance-context.tool';
 
 const user = mock<User>({ id: 'user-1' });
@@ -17,11 +18,14 @@ function harness() {
 	const telemetry = mock<Telemetry>();
 
 	instanceContext.buildBlock.mockResolvedValue(null);
+	instanceContext.hasWithheldWorkflows.mockResolvedValue(false);
 
 	return {
 		instanceContext,
 		telemetry,
-		tool: createGetInstanceContextTool(user, instanceContext, telemetry),
+		tool: createGetInstanceContextTool(user, instanceContext, telemetry, {
+			executionGranted: true,
+		}),
 	};
 }
 
@@ -39,7 +43,7 @@ describe('get_instance_context', () => {
 
 		expect(instanceContext.buildBlock).toHaveBeenCalledWith(
 			expect.objectContaining({
-				scope: { surface: 'mcp', credentialGranted: false },
+				scope: { surface: 'mcp', credentialGranted: false, executionGranted: true },
 				// Stateless server, no thread to track against, so every read is a full snapshot.
 				cursor: null,
 			}),
@@ -53,7 +57,12 @@ describe('get_instance_context', () => {
 
 		expect(instanceContext.buildBlock).toHaveBeenCalledWith(
 			expect.objectContaining({
-				scope: { surface: 'mcp', credentialGranted: false, projectId: 'project-1' },
+				scope: {
+					surface: 'mcp',
+					credentialGranted: false,
+					executionGranted: true,
+					projectId: 'project-1',
+				},
 			}),
 		);
 	});
@@ -74,11 +83,29 @@ describe('get_instance_context', () => {
 	it('reports a genuinely empty instance as empty', async () => {
 		const { tool, instanceContext } = harness();
 		instanceContext.buildBlock.mockResolvedValue(null);
+		instanceContext.hasWithheldWorkflows.mockResolvedValue(false);
 
 		const result = await tool.handler({}, mock());
 
-		expect(payloadOf(result)).toEqual({ empty: true });
+		expect(payloadOf(result)).toEqual({ empty: true, nothingExposed: false });
 		expect(textOf(result)).toBe(EMPTY_INSTANCE_CONTEXT_TEXT);
+	});
+
+	/**
+	 * `availableInMCP` defaults to withheld, so this is what every instance predating the setting
+	 * answers. Calling it an empty instance would send a client off to rebuild an estate it simply
+	 * cannot see.
+	 */
+	it('says nothing is exposed, not that the instance is empty, when the estate is withheld', async () => {
+		const { tool, instanceContext } = harness();
+		instanceContext.buildBlock.mockResolvedValue(null);
+		instanceContext.hasWithheldWorkflows.mockResolvedValue(true);
+
+		const result = await tool.handler({}, mock());
+
+		expect(payloadOf(result)).toEqual({ empty: true, nothingExposed: true });
+		expect(textOf(result)).toBe(NOTHING_EXPOSED_TEXT);
+		expect(textOf(result)).not.toBe(EMPTY_INSTANCE_CONTEXT_TEXT);
 	});
 
 	/**
@@ -112,7 +139,7 @@ describe('get_instance_context', () => {
 			USER_CALLED_MCP_TOOL_EVENT,
 			expect.objectContaining({
 				tool_name: 'get_instance_context',
-				results: { success: true, data: { empty: false } },
+				results: { success: true, data: { empty: false, outcome: 'context' } },
 			}),
 		);
 	});

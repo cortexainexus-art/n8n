@@ -18,7 +18,6 @@ import {
 	WORKFLOW_PREVIEW_APP_URI,
 	type McpAppTelemetryConfig,
 } from '@n8n/mcp-apps/server';
-import { ensureError } from '@n8n/utils/errors/ensure-error';
 import { lazyImport } from '@n8n/utils/lazy-import';
 import { createDeferredPromise, type IDeferredPromise } from '@n8n/utils/promise/deferred-promise';
 import { InstanceSettings } from 'n8n-core';
@@ -36,11 +35,7 @@ import { NodeCatalogService } from '@/node-catalog';
 import { NodeTypes } from '@/node-types';
 import { PostHogClient } from '@/posthog';
 import { AiGatewayService } from '@/services/ai-gateway.service';
-import {
-	AiPreferenceService,
-	renderAiPreferencesBlock,
-	type ApplicableAiPreferences,
-} from '@/services/ai-preference.service';
+import { AiPreferenceService } from '@/services/ai-preference.service';
 import { FolderFinderService } from '@/services/folder-finder.service';
 import { FolderService } from '@/services/folder.service';
 import { NodeResourceExplorerService } from '@/services/node-resource-explorer.service';
@@ -57,7 +52,12 @@ import { WorkflowPublishedDataService } from '@/workflows/workflow-published-dat
 import { WorkflowService } from '@/workflows/workflow.service';
 
 import { McpPostSaveMetricsService } from './mcp-post-save-metrics.service';
-import { MCP_CREATE_AGENT_TOOL_NAME, MCP_PREVIEW_RENDER_REQUESTED_EVENT } from './mcp.constants';
+import {
+	MCP_CREATE_AGENT_TOOL_NAME,
+	MCP_GET_USER_PREFERENCES_TOOL_NAME,
+	MCP_PREVIEW_RENDER_REQUESTED_EVENT,
+	USER_CALLED_MCP_TOOL_EVENT,
+} from './mcp.constants';
 import { getAllowedToolNames } from './mcp-scopes';
 import { areAgentToolsAvailable } from './mcp-tool-availability';
 import type {
@@ -84,13 +84,14 @@ import { createExecuteWorkflowTool } from './tools/execute-workflow.tool';
 import { createGetExecutionTool } from './tools/get-execution.tool';
 import {
 	createGetInstanceContextTool,
-	EMPTY_INSTANCE_CONTEXT_TEXT,
 	GET_INSTANCE_CONTEXT_TOOL_NAME,
+	instanceContextText,
 	INSTANCE_CONTEXT_RESOURCE_DESCRIPTION,
 	INSTANCE_CONTEXT_RESOURCE_URI,
 	readInstanceContext,
 } from './tools/get-instance-context.tool';
 import { createGetNodeUsageTool } from './tools/get-node-usage.tool';
+import { createGetUserPreferencesTool } from './tools/get-user-preferences.tool';
 import { createWorkflowDetailsTool } from './tools/get-workflow-details.tool';
 import { createGetWorkflowHistoryTool } from './tools/get-workflow-history.tool';
 import { createGetWorkflowVersionTool } from './tools/get-workflow-version.tool';
@@ -146,15 +147,13 @@ export type McpFeatureFlags = {
 	mcpApps: McpAppsResolution;
 	/** Canvas node-group support in the workflow-builder tools. */
 	canvasGroupsEnabled: boolean;
-	/** The instance-context read surface: the activity tools and node-usage. */
+	/**
+	 * The instance-context read surface: the four tools, the `n8n://instance/context` resource,
+	 * and the sentence in the instructions that points a client at them.
+	 */
 	instanceContextEnabled: boolean;
-	/** Saved AI preferences in the server instructions. */
+	/** The `get_user_preferences` tool. */
 	aiPreferencesEnabled: boolean;
-};
-
-export type McpServerBuildOptions = {
-	/** True for `initialize` and `server/discover`, the requests that read the instructions. */
-	isConnectionHandshake?: boolean;
 };
 
 type McpAppTelemetryResolution = {
@@ -277,23 +276,9 @@ export class McpService {
 			canvasGroupsEnabled: mcpCanvasGroupsEnabled || flags[MCP_CANVAS_GROUPS_FLAG] === true,
 			instanceContextEnabled:
 				mcpInstanceContextEnabled || flags[MCP_INSTANCE_CONTEXT_FLAG] === true,
+			// Multivariate flag: only the `variant` arm enables the feature.
 			aiPreferencesEnabled: flags[CONTEXT_PREFERENCES_FLAG] === CONTEXT_PREFERENCES_ENABLED_VARIANT,
 		};
-	}
-
-	/** Best-effort: a failed read costs the preferences, not the MCP request. */
-	private async readAiPreferencesBlock(user: User): Promise<string | undefined> {
-		let preferences: ApplicableAiPreferences;
-		try {
-			preferences = await this.aiPreferenceService.getApplicableAcrossProjects(user);
-		} catch (error) {
-			this.logger.warn('Failed to read the AI preferences for the MCP server instructions', {
-				userId: user.id,
-				error: ensureError(error).message,
-			});
-			return undefined;
-		}
-		return renderAiPreferencesBlock(preferences);
 	}
 
 	private resolveMcpApps(envOverride: boolean, flags: FeatureFlags): McpAppsResolution {
@@ -443,15 +428,7 @@ export class McpService {
 		featureFlags: McpFeatureFlags,
 		clientInfo?: McpClientInfo,
 		auth?: McpAuthContext,
-		options: McpServerBuildOptions = {},
 	) {
-		// Only the handshake response carries the instructions, so the per-user
-		// block is read only there and not on every tool call. The read starts
-		// first so it overlaps the other lookups below; it never rejects.
-		const aiPreferences =
-			featureFlags.aiPreferencesEnabled && options.isConnectionHandshake
-				? this.readAiPreferencesBlock(user)
-				: undefined;
 		const { McpServer } = await lazyImport<typeof import('@modelcontextprotocol/server')>(
 			async () => await import('@modelcontextprotocol/server'),
 		);
@@ -475,6 +452,11 @@ export class McpService {
 		// Same rationale again: a grant that cannot reach the instance-context tools is not told
 		// to start by calling them, and does not get the resource that carries the same data.
 		const contextToolsAllowed = allowedToolNames?.has(GET_INSTANCE_CONTEXT_TOOL_NAME) ?? true;
+		// Gates the sentence only; registration below goes through `registerIfAllowed` like every
+		// other tool. No RBAC check: a user's own preferences need no scope.
+		const userPreferencesInstructionsEnabled =
+			featureFlags.aiPreferencesEnabled &&
+			(allowedToolNames?.has(MCP_GET_USER_PREFERENCES_TOOL_NAME) ?? true);
 		const server = new McpServer(
 			{
 				name: 'n8n MCP Server',
@@ -490,7 +472,7 @@ export class McpService {
 					isN8nConnectAvailable: n8nConnectAvailable,
 					canvasGroupsEnabled: featureFlags.canvasGroupsEnabled,
 					isAgentsEnabled: agentInstructionsEnabled,
-					aiPreferences: await aiPreferences,
+					isUserPreferencesEnabled: userPreferencesInstructionsEnabled,
 				}),
 			},
 		);
@@ -644,6 +626,9 @@ export class McpService {
 			// permission, so the reader treats it as one half of the credential gate and resolves the
 			// caller's real access for the other half.
 			const credentialGranted = allowedToolNames?.has('list_credentials') ?? true;
+			// Same shape, for the run leg: it ships run counts and the id of the last failure, and
+			// every other execution read here sits behind `execution:read`.
+			const executionGranted = allowedToolNames?.has('get_workflow_execution') ?? true;
 
 			// The activity reader belongs to the `instance-ai` module, so it is resolved lazily and
 			// only when that module is active — an instance with the surface off never builds it.
@@ -656,11 +641,13 @@ export class McpService {
 				registerIfAllowed(
 					createGetInstanceActivityTool(user, instanceContext, this.telemetry, {
 						credentialGranted,
+						executionGranted,
 					}),
 				);
 				registerIfAllowed(
 					createExpandInstanceActivityTool(user, instanceContext, this.telemetry, {
 						credentialGranted,
+						executionGranted,
 					}),
 				);
 
@@ -683,20 +670,38 @@ export class McpService {
 							// today, so this states the requirement rather than changing behaviour.
 							cacheHint: { ttlMs: 0, cacheScope: 'private' },
 						},
-						read: async () => ({
-							contents: [
-								{
-									uri: INSTANCE_CONTEXT_RESOURCE_URI,
-									mimeType: 'text/plain',
-									text:
-										(await readInstanceContext(user, instanceContext)) ??
-										EMPTY_INSTANCE_CONTEXT_TEXT,
-								},
-							],
-						}),
+						read: async () => {
+							// The tool beside this emits `USER_CALLED_MCP_TOOL_EVENT`; without the same
+							// event here the resource is invisible, and it is the path the instructions
+							// send resource-reading clients to first. Same event with the surface on it
+							// beats a second event name.
+							const read = await readInstanceContext(user, instanceContext, {
+								executionGranted,
+							});
+							this.telemetry.track(USER_CALLED_MCP_TOOL_EVENT, {
+								user_id: user.id,
+								tool_name: GET_INSTANCE_CONTEXT_TOOL_NAME,
+								parameters: { surface: 'resource' },
+								results: { success: true, data: { outcome: read.kind } },
+							});
+
+							return {
+								contents: [
+									{
+										uri: INSTANCE_CONTEXT_RESOURCE_URI,
+										mimeType: 'text/plain',
+										text: instanceContextText(read),
+									},
+								],
+							};
+						},
 					});
 				}
-				registerIfAllowed(createGetInstanceContextTool(user, instanceContext, this.telemetry));
+				registerIfAllowed(
+					createGetInstanceContextTool(user, instanceContext, this.telemetry, {
+						executionGranted,
+					}),
+				);
 			}
 
 			// Node usage reads the dependency index, which is not part of any module and is always
@@ -743,6 +748,14 @@ export class McpService {
 
 		const getDataTableRowsTool = createGetDataTableRowsTool(user, dataTableOps, this.telemetry);
 		registerIfAllowed(getDataTableRowsTool);
+
+		// Not builder-gated: preferences apply to Agents, data tables and folders as well as
+		// workflows, so a caller without the builder still has changes to apply them to.
+		if (featureFlags.aiPreferencesEnabled) {
+			registerIfAllowed(
+				createGetUserPreferencesTool(user, this.aiPreferenceService, this.telemetry),
+			);
+		}
 
 		// Workflow builder tools (enabled via N8N_MCP_BUILDER_ENABLED)
 		if (builderEnabled) {

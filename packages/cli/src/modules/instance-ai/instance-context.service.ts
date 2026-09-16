@@ -47,6 +47,17 @@ const withheldFetchMultiplier = 4;
 const maxAgeMs = 7 * Time.days.toMilliseconds;
 
 /**
+ * How far back the run leg looks on the MCP surface.
+ *
+ * Shorter than `maxAgeMs` on purpose. Instance AI pays the full window once per thread and every
+ * later turn passes a cursor, so its window shrinks to the gap between turns. An MCP read always
+ * passes `cursor: null` — the server is stateless — so it would pay seven days of executions on
+ * every call, and a whole-instance reader has no project predicate to narrow it either. The block
+ * names at most `runWorkflowCap` workflows, so a shorter window costs almost nothing in content.
+ */
+const mcpRunWindowMs = 24 * Time.hours.toMilliseconds;
+
+/**
  * Distinct workflows whose runs may appear. Runs are already folded per workflow, so this caps
  * breadth, not repetition: without it a busy instance's schedules crowd out every edit the user
  * made, which is the signal actually worth carrying.
@@ -112,7 +123,19 @@ export type InstanceContextScope =
 	 * of the credential gate — the other half is the caller's actual `credential:read` on the
 	 * projects being read, which this service resolves rather than trusts.
 	 */
-	| { surface: 'mcp'; projectId?: string; credentialGranted: boolean };
+	| {
+			surface: 'mcp';
+			projectId?: string;
+			credentialGranted: boolean;
+			/**
+			 * Whether the caller's token covers reading executions. The run leg ships run counts,
+			 * failure counts and the id of the last failure, and every other execution read on the
+			 * MCP server sits behind `execution:read` — so a grant that cannot fetch an execution
+			 * is not handed one. Same shape as `credentialGranted`: a content gate, because the
+			 * tool itself rides on `workflow:read` for the legs that are not execution data.
+			 */
+			executionGranted: boolean;
+	  };
 
 /**
  * A scope after the caller's access has actually been resolved. Separate from the requested scope
@@ -125,6 +148,8 @@ type ResolvedScope =
 			projectIds: ActivityProjectScope;
 			/** Of those, the ones whose credential entries the caller may read. */
 			credentialProjectIds: ActivityProjectScope;
+			/** Whether the run leg may be read at all. */
+			runsVisible: boolean;
 	  };
 
 export type ActivityPage = {
@@ -266,7 +291,9 @@ export class InstanceContextService {
 
 			const [entries, runs, inventory] = await Promise.all([
 				this.readEntries({ projectIds, cursor: input.cursor, now, scope: resolved }),
-				this.readRuns({ projectIds, cursor: input.cursor, now, mcpVisibleOnly }),
+				resolved.surface === 'mcp' && !resolved.runsVisible
+					? Promise.resolve([])
+					: this.readRuns({ projectIds, cursor: input.cursor, now, mcpVisibleOnly }),
 				// Only on the opening block. A delta skips it: the estate has not changed in a way
 				// the earlier block failed to cover.
 				isUpdate
@@ -542,9 +569,10 @@ export class InstanceContextService {
 		// The cost is stated rather than hidden: a run whose row commits after this read but whose
 		// `stoppedAt` precedes it is never summarised. Runs have no gap-tolerant cursor the way
 		// entries do, because the aggregate returns counts rather than the ids to de-duplicate on.
+		const windowMs = input.mcpVisibleOnly ? mcpRunWindowMs : maxAgeMs;
 		const stoppedAfter = input.cursor
 			? new Date(Date.parse(input.cursor.runsThrough))
-			: new Date(input.now.getTime() - maxAgeMs);
+			: new Date(input.now.getTime() - windowMs);
 
 		return await this.executionRepository.summariseRunsForProjects({
 			projectIds: input.projectIds,
@@ -594,7 +622,12 @@ export class InstanceContextService {
 			const credentialProjectIds = scope.credentialGranted
 				? await this.credentialReadableProjectIds(user, [projectId])
 				: [];
-			return { surface: 'mcp', projectIds: [projectId], credentialProjectIds };
+			return {
+				surface: 'mcp',
+				projectIds: [projectId],
+				credentialProjectIds,
+				runsVisible: scope.executionGranted,
+			};
 		}
 
 		if (scope.surface === 'conversation') return null;
@@ -606,7 +639,12 @@ export class InstanceContextService {
 				scope.credentialGranted && hasGlobalScope(user, ['credential:read'], { mode: 'allOf' })
 					? 'all-projects'
 					: [];
-			return { surface: 'mcp', projectIds: 'all-projects', credentialProjectIds };
+			return {
+				surface: 'mcp',
+				projectIds: 'all-projects',
+				credentialProjectIds,
+				runsVisible: scope.executionGranted,
+			};
 		}
 
 		const [scopedIds, personalProject] = await Promise.all([
@@ -623,7 +661,12 @@ export class InstanceContextService {
 			? await this.credentialReadableProjectIds(user, projectIds)
 			: [];
 
-		return { surface: 'mcp', projectIds, credentialProjectIds };
+		return {
+			surface: 'mcp',
+			projectIds,
+			credentialProjectIds,
+			runsVisible: scope.executionGranted,
+		};
 	}
 
 	/**
@@ -646,15 +689,41 @@ export class InstanceContextService {
 	}
 
 	/**
+	 * Whether anything exists in scope that this surface is withholding, asked only when the block
+	 * came back empty.
+	 *
+	 * `availableInMCP` defaults to withheld, so an instance that predates the setting exposes
+	 * nothing: every leg comes back empty and the honest answer is "nothing is exposed", not
+	 * "nothing has been built". Telling a client the latter sends it off to rebuild an estate it
+	 * simply cannot see, which is the opposite of what this surface is for.
+	 */
+	async hasWithheldWorkflows(user: User, scope: InstanceContextScope): Promise<boolean> {
+		const resolved = await this.resolveScope(user, scope);
+		if (resolved === null) return false;
+
+		const { total } = await this.workflowRepository.findRecentForProjects(resolved.projectIds, 1, {
+			mcpVisibleOnly: false,
+		});
+		return total > 0;
+	}
+
+	/**
 	 * Drops entries about workflows the instance withholds from MCP.
 	 *
 	 * MCP reads are filtered per workflow by `settings.availableInMCP` — `search_workflow_executions`
 	 * and the workflow history, version and diff tools all enforce it — so a feed that ignored it
 	 * would report the edits and runs of workflows the user has deliberately kept off this surface.
 	 *
-	 * An entry whose workflow no longer resolves is kept. A deleted workflow cannot be withheld
-	 * from anything, and its deletion is the entry most worth carrying: dropping it to be safe
-	 * would lose the one signal this surface exists to give.
+	 * An entry whose workflow no longer resolves is dropped, not kept. The question is not whether
+	 * a deleted workflow can still be withheld — it cannot — but whether this surface was ever
+	 * allowed to name it, and after the row's workflow is gone there is no way left to prove it
+	 * was. `availableInMCP` defaults to withheld, so the common case is a workflow that was never
+	 * exposed, whose whole history would otherwise appear the moment it was deleted.
+	 *
+	 * The cost is real: deletions of workflows that *were* exposed disappear too, and a deletion
+	 * is among the entries most worth carrying. Recording visibility on the activity row at write
+	 * time is what would let both hold; until then the conservative default is the only one that
+	 * cannot leak.
 	 */
 	private async withoutWithheldWorkflows(
 		rows: ActivityEvent[],
@@ -677,7 +746,8 @@ export class InstanceContextService {
 
 		return rows.filter((row) => {
 			if (row.resourceType !== 'workflow' || !row.resourceId) return true;
-			return availability.get(row.resourceId) ?? true;
+			// Absent from the map means the workflow is gone, and with it any proof it was visible.
+			return availability.get(row.resourceId) ?? false;
 		});
 	}
 }

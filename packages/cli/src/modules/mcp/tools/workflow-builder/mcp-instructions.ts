@@ -6,10 +6,12 @@
  * It provides a condensed orchestration guide for the tool calling sequence.
  */
 
-import { LIST_N8N_GATEWAY_SERVICES_TOOL_NAME } from '../../mcp.constants';
+import {
+	LIST_N8N_GATEWAY_SERVICES_TOOL_NAME,
+	MCP_GET_USER_PREFERENCES_TOOL_NAME,
+	MCP_USER_PREFERENCES_TRIGGER_CLAUSE,
+} from '../../mcp.constants';
 import { GET_INSTANCE_CONTEXT_TOOL_NAME } from '../get-instance-context.tool';
-import { GET_NODE_USAGE_TOOL_NAME } from '../get-node-usage.tool';
-import { GET_INSTANCE_ACTIVITY_TOOL_NAME } from '../instance-activity.tool';
 import {
 	MCP_CREATE_WORKFLOW_FROM_CODE_TOOL,
 	MCP_UPDATE_WORKFLOW_TOOL,
@@ -55,10 +57,11 @@ export type McpInstructionsOptions = {
 	isInstanceContextEnabled?: boolean;
 
 	/**
-	 * The caller's saved AI preferences, already rendered as a tagged block by
-	 * `AiPreferenceService`. Appended as the last section when set.
+	 * Whether the `get_user_preferences` tool is registered for this caller. If true, one
+	 * sentence points the client at it: clients that load tool descriptions on demand never
+	 * read the tool's own description before building. Identical for every caller.
 	 */
-	aiPreferences?: string;
+	isUserPreferencesEnabled?: boolean;
 };
 export function getMcpInstructions(options: McpInstructionsOptions): string {
 	const {
@@ -67,21 +70,26 @@ export function getMcpInstructions(options: McpInstructionsOptions): string {
 		canvasGroupsEnabled = false,
 		isAgentsEnabled = false,
 		isInstanceContextEnabled = false,
-		aiPreferences,
+		isUserPreferencesEnabled = false,
 	} = options;
 	const INTRO = 'This is the official MCP server for n8n, a workflow automation platform.';
 
-	// Named in the instructions rather than left to discovery: an instance is not empty, and a
-	// client that opens by asking what to build ignores work already in progress. Measured: with
-	// this sentence the opening read happens on every run; with the tools registered but nothing
-	// pointing at them, the client never reaches for them at all.
+	// One sentence, placed right after the intro: some clients keep only the first 2048
+	// characters of the instructions, and a test pins the sentence inside that budget.
+	const USER_PREFERENCES_HINT = isUserPreferencesEnabled
+		? `Before ${MCP_USER_PREFERENCES_TRIGGER_CLAUSE} call ${MCP_GET_USER_PREFERENCES_TOOL_NAME} first and apply what it returns for the remainder of the task.`
+		: '';
+
+	// Its only job is to get the opening read called. Measured: with this sentence the read
+	// happens on every run; with the tools registered and nothing pointing at them, the client
+	// does not reach for them at all. What the read contains, and how to treat it, belong in the
+	// block and the tool description, which are not paid for at every handshake.
 	//
-	// Placement is load-bearing. A client may keep only the first part of these instructions —
-	// Claude Code truncates at 2048 characters, and the full text here is several times that — so
-	// anything below the cut never arrives. This sits second, right after the intro, and a test
-	// pins it inside the budget. Do not push it down the list.
+	// Placement is load-bearing, and so is length. A client may keep only the opening of these
+	// instructions — Claude Code truncates at 2048 characters, and the full text is several times
+	// that — so anything below the cut never arrives. A test pins this inside the budget.
 	const INSTANCE_CONTEXT_HINT = isInstanceContextEnabled
-		? `Start with the instance, not a blank page. Read the n8n://instance/context resource, or call ${GET_INSTANCE_CONTEXT_TOOL_NAME} if you do not read resources, before your first substantive answer. It reports which workflows exist, what changed recently, and what has run or failed. When the user is vague ("fix it", "carry on", "what should I look at"), the answer is usually the most recent thing there. Use ${GET_INSTANCE_ACTIVITY_TOOL_NAME} to look further back, and ${GET_NODE_USAGE_TOOL_NAME} to match how this instance already builds before choosing between equivalent nodes. Do not narrate any of it back unprompted — let it change what you do rather than what you say.`
+		? `Start with the instance, not a blank page. Read the n8n://instance/context resource, or call ${GET_INSTANCE_CONTEXT_TOOL_NAME} if you do not read resources, before your first substantive answer.`
 		: '';
 
 	// Only appended when the flag is on; keeps the paid-per-session string short.
@@ -148,11 +156,11 @@ Agent conversations and runs are not workflow executions: get_workflow_execution
 
 	return [
 		INTRO,
+		USER_PREFERENCES_HINT,
 		INSTANCE_CONTEXT_HINT,
 		isBuilderEnabled && isAgentsEnabled ? ARTIFACT_ROUTING_INSTRUCTIONS : '',
 		isAgentsEnabled ? AGENT_INSTRUCTIONS : '',
 		isBuilderEnabled ? BUILDER_INSTRUCTIONS : '',
-		aiPreferences,
 	]
 		.filter(Boolean)
 		.join('\n\n');

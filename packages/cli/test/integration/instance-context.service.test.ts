@@ -301,6 +301,7 @@ describe('InstanceContextService', () => {
 		const mcp = (credentialGranted = true): InstanceContextScope => ({
 			surface: 'mcp',
 			credentialGranted,
+			executionGranted: true,
 		});
 
 		it('reads the projects the caller can open and not the ones they cannot', async () => {
@@ -432,8 +433,12 @@ describe('InstanceContextService', () => {
 			expect(await service.list({ user, scope: mcp(), limit: 20 })).toEqual([]);
 		});
 
-		/** A deleted workflow cannot be withheld from anything, and the deletion is the point. */
-		it('still reports the deletion of a workflow that no longer exists', async () => {
+		/**
+		 * The row outlives the workflow, and with it any proof the workflow was ever exposed.
+		 * `availableInMCP` defaults to withheld, so an unresolvable id must read as withheld or a
+		 * never-exposed workflow's whole history surfaces the moment it is deleted — name included.
+		 */
+		it('drops entries naming a workflow that no longer exists', async () => {
 			await record({
 				category: 'workflow',
 				action: 'deleted',
@@ -443,9 +448,11 @@ describe('InstanceContextService', () => {
 				resourceName: 'Nightly sync',
 			});
 
-			const entries = await service.list({ user, scope: mcp(), limit: 20 });
+			expect(await service.list({ user, scope: mcp(), limit: 20 })).toEqual([]);
 
-			expect(entries.map((entry) => entry.action)).toEqual(['deleted']);
+			// The conversation surface has no per-workflow visibility rule, so it still sees it.
+			const viaChat = await service.list({ user, scope: bound(project.id), limit: 20 });
+			expect(viaChat.map((entry) => entry.resourceName)).toEqual(['Nightly sync']);
 		});
 
 		it('answers a withheld id exactly as it answers a pruned one', async () => {

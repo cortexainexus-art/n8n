@@ -1,7 +1,13 @@
 import { LicenseState, ModuleRegistry } from '@n8n/backend-common';
 import { mockInstance, mockLogger } from '@n8n/backend-test-utils';
 import { ExecutionsConfig, GlobalConfig, WorkflowsConfig } from '@n8n/config';
-import { ExecutionRepository, ProjectRepository, SharedWorkflowRepository, User } from '@n8n/db';
+import {
+	ExecutionRepository,
+	GLOBAL_MEMBER_ROLE,
+	ProjectRepository,
+	SharedWorkflowRepository,
+	User,
+} from '@n8n/db';
 import { registerWorkflowPreviewApp } from '@n8n/mcp-apps/server';
 import { InstanceSettings } from 'n8n-core';
 
@@ -24,7 +30,11 @@ import { ExecutionService } from '@/executions/execution.service';
 import { SubworkflowPolicyChecker } from '@/executions/pre-execution-checks/subworkflow-policy-checker';
 import { DataTableProxyService } from '@/modules/data-table/data-table-proxy.service';
 import { InstanceContextService } from '@/modules/instance-ai/instance-context.service';
-import { INSTANCE_CONTEXT_RESOURCE_URI } from '../tools/get-instance-context.tool';
+import {
+	EMPTY_INSTANCE_CONTEXT_TEXT,
+	INSTANCE_CONTEXT_RESOURCE_URI,
+	NOTHING_EXPOSED_TEXT,
+} from '../tools/get-instance-context.tool';
 import { WorkflowDependencyQueryService } from '@/modules/workflow-index/workflow-dependency-query.service';
 import { NodeCatalogService } from '@/node-catalog';
 import { NodeTypes } from '@/node-types';
@@ -57,9 +67,22 @@ const mcpFeatureFlags = (overrides: Partial<McpFeatureFlags> = {}): McpFeatureFl
 	mcpApps: { enabled: false, variant: 'unassigned' },
 	canvasGroupsEnabled: false,
 	instanceContextEnabled: false,
-	aiPreferencesEnabled: false,
+	// On by default so the drift guards below cover `get_user_preferences`. Its own
+	// registration tests set it explicitly either way.
+	aiPreferencesEnabled: true,
 	...overrides,
 });
+
+/** Reaches the resource's own read callback, which registration assertions never touch. */
+const readResourceText = async (server: unknown, uri: string): Promise<string> => {
+	const registered = (
+		server as {
+			_registeredResources: Record<string, { readCallback: () => Promise<unknown> }>;
+		}
+	)._registeredResources[uri];
+	const result = (await registered.readCallback()) as { contents: Array<{ text: string }> };
+	return result.contents[0].text;
+};
 
 const getRegisteredResourceUris = (server: unknown): Set<string> =>
 	new Set(
@@ -85,6 +108,10 @@ describe('getAllowedToolNames', () => {
 		);
 	});
 
+	it('resolves the preferences scope to its one tool', () => {
+		expect(getAllowedToolNames(['aiPreference:read'])).toEqual(new Set(['get_user_preferences']));
+	});
+
 	it('ignores unknown scopes', () => {
 		expect(getAllowedToolNames(['tool:listWorkflows', 'openid'])).toEqual(new Set());
 	});
@@ -107,7 +134,9 @@ describe('getAllowedToolNames', () => {
 });
 
 describe('McpService scope enforcement', () => {
-	const user = Object.assign(new User(), { id: 'user-1' });
+	// A real MCP caller always arrives with its role loaded: `get_user_preferences` and
+	// `list_workflow_tags` both read the role to check a scope.
+	const user = Object.assign(new User(), { id: 'user-1', role: GLOBAL_MEMBER_ROLE });
 
 	const buildService = ({
 		builderEnabled = true,
@@ -238,9 +267,12 @@ describe('McpService scope enforcement', () => {
 		);
 
 		const registered = getRegisteredToolNames(server);
+		// Driven off the set so a fifth tool cannot be added without this case noticing.
+		const moduleBound = [...INSTANCE_CONTEXT_TOOLS].filter((name) => name !== 'get_node_usage');
+
 		expect(registered).toContain('get_node_usage');
-		expect(registered).not.toContain('get_instance_activity');
-		expect(registered).not.toContain('expand_instance_activity');
+		for (const name of moduleBound) expect(registered).not.toContain(name);
+		expect(getRegisteredResourceUris(server)).not.toContain(INSTANCE_CONTEXT_RESOURCE_URI);
 	});
 
 	/** They ride on `workflow:read`, so a grant without it must not reach them. */
@@ -283,6 +315,40 @@ describe('McpService scope enforcement', () => {
 	});
 
 	/**
+	 * The read callback, not just the registration. It is not a pass-through — it maps an empty
+	 * read to its own text and emits its own telemetry — so the two paths can drift silently.
+	 */
+	it('serves the block through the resource, and the withheld text when nothing is exposed', async () => {
+		const instanceContext = mockInstance(InstanceContextService);
+		mockInstance(WorkflowDependencyQueryService);
+
+		const server = await buildService({ instanceAiActive: true }).getServer(
+			user,
+			mcpFeatureFlags({ instanceContextEnabled: true }),
+		);
+
+		instanceContext.buildBlock.mockResolvedValue({
+			block: 'Workflows that already exist here: 2',
+			cursor: { activityMark: 1, activitySeen: [], runsThrough: '2026-09-16T00:00:00.000Z' },
+		});
+		expect(await readResourceText(server, INSTANCE_CONTEXT_RESOURCE_URI)).toBe(
+			'Workflows that already exist here: 2',
+		);
+
+		// Empty read plus an estate that exists: the client must not be told the instance is empty.
+		instanceContext.buildBlock.mockResolvedValue(null);
+		instanceContext.hasWithheldWorkflows.mockResolvedValue(true);
+		expect(await readResourceText(server, INSTANCE_CONTEXT_RESOURCE_URI)).toBe(
+			NOTHING_EXPOSED_TEXT,
+		);
+
+		instanceContext.hasWithheldWorkflows.mockResolvedValue(false);
+		expect(await readResourceText(server, INSTANCE_CONTEXT_RESOURCE_URI)).toBe(
+			EMPTY_INSTANCE_CONTEXT_TEXT,
+		);
+	});
+
+	/**
 	 * The resource carries the same instance data as the tool, so a grant that cannot call the
 	 * tool must not be able to read it instead. `registerResource` does no filtering of its own.
 	 */
@@ -311,6 +377,49 @@ describe('McpService scope enforcement', () => {
 
 		const gated = [...withBuilder].filter((name) => !withoutBuilder.has(name)).sort();
 		expect(gated).toEqual([...BUILDER_TOOLS].sort());
+	});
+
+	describe('get_user_preferences registration', () => {
+		it('registers the tool when the preferences flag is on', async () => {
+			const server = await buildService().getServer(
+				user,
+				mcpFeatureFlags({ aiPreferencesEnabled: true }),
+			);
+
+			expect(getRegisteredToolNames(server)).toContain('get_user_preferences');
+		});
+
+		it('does not register the tool when the preferences flag is off', async () => {
+			const server = await buildService().getServer(
+				user,
+				mcpFeatureFlags({ aiPreferencesEnabled: false }),
+			);
+
+			expect(getRegisteredToolNames(server)).not.toContain('get_user_preferences');
+		});
+
+		// Preferences cover Agents, data tables and folders too, none of which are
+		// builder-gated, so the tool must not disappear with the builder.
+		it('registers the tool with the builder disabled', async () => {
+			const server = await buildService({ builderEnabled: false }).getServer(
+				user,
+				mcpFeatureFlags({ aiPreferencesEnabled: true }),
+			);
+
+			expect(getRegisteredToolNames(server)).toContain('get_user_preferences');
+		});
+
+		it('is not a builder tool, so it stays out of the builder-gated set', () => {
+			expect(BUILDER_TOOLS.has('get_user_preferences')).toBe(false);
+		});
+
+		it('is out of reach of a grant that does not hold the preferences scope', async () => {
+			const server = await buildService().getServer(user, mcpFeatureFlags(), undefined, {
+				grantedScopes: ['workflow:read', 'workflow:write'],
+			});
+
+			expect(getRegisteredToolNames(server)).not.toContain('get_user_preferences');
+		});
 	});
 
 	it('does not register folder tools when folders are not licensed', async () => {

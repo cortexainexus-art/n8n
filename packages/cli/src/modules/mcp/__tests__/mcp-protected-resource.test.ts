@@ -6,6 +6,7 @@ import type { McpConfig } from '../mcp.config';
 import type { McpSettingsService } from '../mcp.settings.service';
 import type { UrlService } from '@/services/url.service';
 
+import { INSTANCE_CONTEXT_TOOLS } from '../mcp-scopes';
 import { McpProtectedResource } from '../mcp-protected-resource';
 
 const makeGlobalConfig = ({ builderEnabled = true, tagsDisabled = false } = {}) =>
@@ -48,6 +49,33 @@ describe('McpProtectedResource', () => {
 			expect(scopeTools['tag:read']).toContain('list_workflow_tags');
 		});
 
+		/**
+		 * This decides what the OAuth consent screen advertises. With the `instance-ai` module off
+		 * the tools can never be registered for anyone, so listing them promises a grant the
+		 * server cannot honour.
+		 */
+		it('advertises the instance-context tools while the module is active', () => {
+			moduleRegistry.isActive.mockReturnValue(true);
+
+			const scopeTools = resource.getScopeTools();
+
+			for (const tool of INSTANCE_CONTEXT_TOOLS) {
+				expect(scopeTools['workflow:read']).toContain(tool);
+			}
+		});
+
+		it('withholds them from consent when the module is inactive', () => {
+			moduleRegistry.isActive.mockImplementation((name) => name !== 'instance-ai');
+
+			const scopeTools = resource.getScopeTools();
+
+			for (const tool of INSTANCE_CONTEXT_TOOLS) {
+				expect(scopeTools['workflow:read']).not.toContain(tool);
+			}
+			// Unrelated entries under the same scope are untouched.
+			expect(scopeTools['workflow:read']).toContain('search_workflows');
+		});
+
 		it('should drop tools this instance does not expose', () => {
 			const limitedResource = new McpProtectedResource(
 				urlService,
@@ -84,6 +112,26 @@ describe('McpProtectedResource', () => {
 			expect(scopeTools['project:write']).not.toContain('search_folders');
 			expect(scopeTools['project:read']).not.toContain('search_folders');
 			expect(scopeTools['project:read']).toContain('search_projects');
+		});
+
+		it('advertises the preferences scope with its one tool', () => {
+			expect(resource.scopes).toContain('aiPreference:read');
+			expect(resource.getScopeTools()['aiPreference:read']).toEqual(['get_user_preferences']);
+		});
+
+		// The flag is per-user PostHog and unreachable from the descriptor, so the scope is
+		// offered to everyone; granting it yields no tool until the flag is on.
+		it('keeps advertising the preferences scope regardless of the builder', () => {
+			const withoutBuilder = new McpProtectedResource(
+				urlService,
+				mcpSettingsService,
+				mcpConfig,
+				makeGlobalConfig({ builderEnabled: false }),
+				moduleRegistry,
+				licenseState,
+			);
+
+			expect(withoutBuilder.getScopeTools()['aiPreference:read']).toEqual(['get_user_preferences']);
 		});
 
 		it('should drop agent scopes and tools when the agents module is inactive', () => {

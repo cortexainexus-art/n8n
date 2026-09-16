@@ -10,7 +10,10 @@
 import type { User } from '@n8n/db';
 import z from 'zod';
 
-import type { InstanceContextService } from '@/modules/instance-ai/instance-context.service';
+import type {
+	InstanceContextScope,
+	InstanceContextService,
+} from '@/modules/instance-ai/instance-context.service';
 import type { Telemetry } from '@/telemetry';
 
 import { USER_CALLED_MCP_TOOL_EVENT } from '../mcp.constants';
@@ -21,6 +24,15 @@ export const INSTANCE_CONTEXT_RESOURCE_URI = 'n8n://instance/context';
 
 /** Said only when the read succeeded and the instance is genuinely empty — never on failure. */
 export const EMPTY_INSTANCE_CONTEXT_TEXT = 'Nothing has been built on this instance yet.';
+
+/**
+ * Said when the estate exists but none of it is exposed to MCP. `availableInMCP` defaults to
+ * withheld, so this is what every instance that predates the setting reports — and it must not be
+ * confused with an empty instance, which would send a client off to rebuild what it cannot see.
+ */
+export const NOTHING_EXPOSED_TEXT =
+	'No workflows on this instance are exposed to MCP, so there is nothing to report here. ' +
+	'Ask the user to expose one in Settings, under MCP.';
 
 const DESCRIPTION =
 	'Read the opening picture of this n8n instance: which workflows exist, what has recently been ' +
@@ -48,8 +60,12 @@ const outputSchema = {
 	empty: z
 		.boolean()
 		.optional()
+		.describe('Set when there is nothing to report. Read `nothingExposed` for the reason.'),
+	nothingExposed: z
+		.boolean()
+		.optional()
 		.describe(
-			'Set when this instance has nothing to show yet — no workflows, no recent changes, no runs. A fresh instance, not an error.',
+			'Present when the answer is empty. True means workflows exist here but none are exposed to MCP, so the estate is real and simply out of reach — do not treat it as a fresh instance. False means the instance genuinely holds nothing yet.',
 		),
 } satisfies z.ZodRawShape;
 
@@ -58,31 +74,50 @@ const outputSchema = {
  * thread has already been shown; the MCP server is stateless and has no thread, so there is
  * nothing to track against and nothing to carry forward.
  */
+export type InstanceContextRead =
+	| { kind: 'context'; text: string }
+	/** Nothing exists in scope at all. */
+	| { kind: 'empty' }
+	/** Things exist, but none of them are exposed to this surface. */
+	| { kind: 'withheld' };
+
 export async function readInstanceContext(
 	user: User,
 	instanceContext: InstanceContextService,
+	options: { executionGranted: boolean },
 	projectId?: string,
-): Promise<string | null> {
-	const built = await instanceContext.buildBlock({
-		user,
-		scope: {
-			surface: 'mcp',
-			// Deliberately withheld, not a no-op: the feed does carry credential entries, and the
-			// conversation block renders them. No per-call grant reaches this read, so it takes the
-			// conservative floor and the block never names a credential.
-			credentialGranted: false,
-			...(projectId !== undefined ? { projectId } : {}),
-		},
-		cursor: null,
-	});
+): Promise<InstanceContextRead> {
+	const scope = buildScope(options.executionGranted, projectId);
+	const built = await instanceContext.buildBlock({ user, scope, cursor: null });
+	if (built) return { kind: 'context', text: built.block };
 
-	return built?.block ?? null;
+	// An empty block has two very different causes, and the client acts on them differently.
+	return (await instanceContext.hasWithheldWorkflows(user, scope))
+		? { kind: 'withheld' }
+		: { kind: 'empty' };
 }
+
+/** The text a client sees for each outcome. */
+export function instanceContextText(read: InstanceContextRead): string {
+	if (read.kind === 'context') return read.text;
+	return read.kind === 'withheld' ? NOTHING_EXPOSED_TEXT : EMPTY_INSTANCE_CONTEXT_TEXT;
+}
+
+const buildScope = (executionGranted: boolean, projectId?: string): InstanceContextScope => ({
+	surface: 'mcp',
+	executionGranted,
+	// Deliberately withheld, not a no-op: the feed does carry credential entries, and the
+	// conversation block renders them. No per-call grant reaches this read, so it takes the
+	// conservative floor and the block never names a credential.
+	credentialGranted: false,
+	...(projectId !== undefined ? { projectId } : {}),
+});
 
 export const createGetInstanceContextTool = (
 	user: User,
 	instanceContext: InstanceContextService,
 	telemetry: Telemetry,
+	options: { executionGranted: boolean },
 ): ToolDefinition<typeof inputSchema> => ({
 	name: GET_INSTANCE_CONTEXT_TOOL_NAME,
 	config: {
@@ -108,16 +143,21 @@ export const createGetInstanceContextTool = (
 			// A failed read throws rather than answering `empty`. The instructions tell an agent to
 			// treat an empty instance as "start from a blank page", so reporting a database failure
 			// that way would send it off to rebuild work that already exists.
-			const context = await readInstanceContext(user, instanceContext, projectId);
-			const payload = context === null ? { empty: true } : { context };
+			const read = await readInstanceContext(user, instanceContext, options, projectId);
+			const text = instanceContextText(read);
 
-			telemetryPayload.results = { success: true, data: { empty: context === null } };
+			const payload =
+				read.kind === 'context'
+					? { context: text }
+					: { empty: true, nothingExposed: read.kind === 'withheld' };
+
+			telemetryPayload.results = {
+				success: true,
+				data: { empty: read.kind !== 'context', outcome: read.kind },
+			};
 			telemetry.track(USER_CALLED_MCP_TOOL_EVENT, telemetryPayload);
 
-			return {
-				content: [{ type: 'text', text: context ?? EMPTY_INSTANCE_CONTEXT_TEXT }],
-				structuredContent: payload,
-			};
+			return { content: [{ type: 'text', text }], structuredContent: payload };
 		} catch (error) {
 			telemetryPayload.results = {
 				success: false,
